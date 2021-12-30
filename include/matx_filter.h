@@ -239,6 +239,7 @@ private:
                   res, cuCmulf(coeffs[k], out[row * CORR_COLS + col - k - 1]));
             }
             else {
+              printf("%lu %f\n", num_recursive, coeffs[k]);
               res += coeffs[k] * out[row * CORR_COLS + col - k - 1];
             }
           }

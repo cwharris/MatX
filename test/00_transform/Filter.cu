@@ -30,33 +30,48 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /////////////////////////////////////////////////////////////////////////////////
 
-#pragma once
-#include <cuda/std/ccomplex>
-#include "matx_defines.h"
-#include "matx_half_complex.h"
-#include "matx_half.h"
+#include "assert.h"
+#include "matx.h"
+#include "matx_pybind.h"
+#include "test_types.h"
+#include "utilities.h"
+#include "gtest/gtest.h"
 
-#include "matx_cache.h"
-#include "matx_error.h"
-#include "matx_tensor.h"
-#include "matx_random.h"
-#include "matx_tensor_generators.h"
-#include "matx_tensor_ops.h"
-#include "matx_exec_kernel.h"
-#include "matx_filter.h"
-#include "matx_fft.h"
-#include "matx_conv.h"
-#include "matx_corr.h"
-#include "matx_matmul.h"
-#include "matx_reduce.h"
-#include "matx_inverse.h"
-#include "matx_solver.h"
-#include "matx_cov.h"
-#include "matx_cub.h"
+using namespace matx;
 
+template <typename T> class FilterTest : public ::testing::Test {
 
-using fcomplex = cuda::std::complex<float>;
-using dcomplex = cuda::std::complex<double>;
+protected:
+  const index_t signal_size = 16384000;
+  void SetUp() override
+  {
+    pb = std::make_unique<detail::MatXPybind>();
+    pb->InitAndRunTVGenerator<T>("01_signal", "filter", "run", {signal_size});
+  }
 
-#define TEST_VECTOR_PATH "generated/"
+  void TearDown() { pb.reset(); }
 
+  tensor_t<T, 1> x{{signal_size}};
+  tensor_t<T, 1> y{{signal_size}};
+  std::array<float, 2> a = {0.5f, -0.01f};
+  std::array<float, 2> b = {.75f, .33f};
+
+  std::unique_ptr<detail::MatXPybind> pb;
+};
+
+template <typename TensorType>
+class FilterTestFloatNonComplexNonHalfTypes : public FilterTest<TensorType> {
+};
+
+TYPED_TEST_SUITE(FilterTestFloatNonComplexNonHalfTypes, MatXFloatNonComplexNonHalfTypes);
+
+TYPED_TEST(FilterTestFloatNonComplexNonHalfTypes, iir_long_1d)
+{
+  MATX_ENTER_HANDLER();
+  this->pb->NumpyToTensorView(this->x, "x");
+  filter(this->y, this->x, this->a, this->b, 0);
+  cudaStreamSynchronize(0);
+
+  MATX_TEST_ASSERT_COMPARE(this->pb, this->y, "y", 0.01);
+  MATX_EXIT_HANDLER();
+}
