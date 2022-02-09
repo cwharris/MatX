@@ -275,6 +275,138 @@ namespace detail {
   }
 
 
+  /**
+   * @brief Returns an N-D coordinate as an array corresponding to the absolute index abs
+   * 
+   * @param abs Absolute index
+   * @return std::array of indices 
+   */
+  template <typename OpType, typename StrideType>
+  __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ auto GetIdxFromAbs(const OpType &op, index_t abs) {
+    std::array<decltype(op.Size(0)), OpType::Rank()> indices;
+    
+    for (int idx = 0; idx < OpType::Rank(); idx++) {
+      if (idx == OpType::Rank()-1) {
+        indices[OpType::Rank()-1] = abs;
+      }
+      else {
+        // no std::accumulate on the device
+        StrideType prod = 1;
+        for (int i = idx + 1; i < OpType::Rank(); i++) {
+          prod *= op.Size(i);
+        }
+
+        indices[idx] = abs / prod;
+        abs -= prod * indices[idx];
+      }
+    }
+
+    return indices;
+  }
+
+  /**
+   * @brief Returns an N-D coordinate as an array corresponding to the absolute index abs
+   * 
+   * @param abs Absolute index
+   * @return std::array of indices 
+   */
+  template <typename OpType, typename ShapeType, typename StrideType>
+  __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ auto GetAbsFromIdx(const OpType &op, const ShapeType &shape) {
+    StrideType total = 1;
+    for (int i = 1; i < OpType::Rank(); i++) {
+      total *= OpType.Size(i);
+    }
+    
+    for (int idx = 0; idx < RANK; idx++) {
+      if (idx == RANK-1) {
+        indices[RANK-1] = abs;
+      }
+      else {
+        // no std::accumulate on the device
+        StrideType prod = 1;
+        for (int i = idx + 1; i < RANK; i++) {
+          prod *= op.Size(i);
+        }
+
+        indices[idx] = abs / prod;
+        abs -= prod * indices[idx];
+      }
+    }
+
+    return indices;
+  }
+
+
+  template <typename OpType>
+  struct RandomOperatorIterator {
+    using self_type = RandomOperatorIterator<OpType>;
+    using value_type = typename OpType::scalar_type;
+    using stride_type = std::conditional_t<is_tensor_view_v<OpType>, 
+                          typename OpType::desc_type::stride_type, 
+                          value_type>;
+    using pointer = value_type*;
+    using reference = value_type;
+    using iterator_category = std::random_access_iterator_tag;
+    using difference_type = typename std::iterator<iterator_category, value_type>::difference_type;
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ RandomOperatorIterator(const OpType &op) : op_(op), offset_(0) {}
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ RandomOperatorIterator(const OpType &op, stride_type offset) : op_(op), offset_(offset) {}
+
+    /**
+     * @brief Dereference value at a pre-computed offset
+     * 
+     * @return Value at offset 
+     */
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ reference operator*() const
+    {
+      auto arrs = GetIdxFromAbs<OpType, stride_type>(op_, offset_);
+      return op_.operator()(arrs);
+    }  
+
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ self_type operator+(difference_type offset) const
+    {
+      return self_type{op_, offset_ + offset};
+    }
+
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ reference operator[](difference_type offset) const
+    {
+      return *(*this + offset);
+    }  
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__  self_type operator++(int)
+    {
+        self_type retval = *this;
+        offset_++;
+        return retval;
+    }  
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ self_type operator++()
+    {
+        offset_++;
+        return *this;
+    }  
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ self_type& operator+=(difference_type offset)
+    {
+        offset_ += offset;
+        return *this;
+    }
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ self_type operator-(difference_type offset) const
+    {
+        return self_type{op_, offset_ - offset};
+    }
+
+
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ self_type& operator-=(difference_type offset)
+    {
+        offset_ -= offset;
+        return *this;
+    }  
+
+    OpType op_;
+    stride_type offset_;  
+  };
 
 }  
 }

@@ -1154,12 +1154,12 @@ void inline sum(TensorType &dest, const InType &in, cudaStream_t stream = 0)
 {
 #ifdef __CUDACC__
   // Use CUB implementation if we have a tensor on the RHS
-  if constexpr (is_tensor_view_v<InType>) {
+//  if constexpr (is_tensor_view_v<InType>) {
     cub_sum<TensorType, InType>(dest, in, stream);
-  }
-  else { // Fall back to the slow path of custom implementation
-    reduce(dest, in, detail::reduceOpSum<typename TensorType::scalar_type>(), stream, true);
-  }
+  // }
+  // else { // Fall back to the slow path of custom implementation
+  //   reduce(dest, in, detail::reduceOpSum<typename TensorType::scalar_type>(), stream, true);
+  // }
 #endif  
 }
 

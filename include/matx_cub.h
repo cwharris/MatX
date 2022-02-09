@@ -68,7 +68,6 @@ struct CubParams_t {
   CUBOperation_t op;
   index_t size;
   index_t batches;
-  void *A;
   void *a_out;
   MatXDataType_t dtype;
   cudaStream_t stream;
@@ -118,51 +117,23 @@ public:
 #ifdef __CUDACC__  
     // Input/output tensors much match rank/dims
     if constexpr (op == CUB_OP_RADIX_SORT || op == CUB_OP_INC_SUM) {
-      static_assert(OutputTensor::Rank() == InputTensor::Rank(), "CUB input and output tensor ranks must match");
+      static_assert(OutputTensor::Rank() == InputTensor::Rank(), "CUB input and output operator ranks must match");
       static_assert(RANK >= 1, "CUB function must have an output rank of 1 or higher");
       for (int i = 0; i < a.Rank(); i++) {
         MATX_ASSERT(a.Size(i) == a_out.Size(i), matxInvalidSize);
       }
     }
 
+    // The first time we call all the Exec functions d_temp is set to nullptr, which signals
+    // to CUB to just return the allocation size
     if constexpr (op == CUB_OP_RADIX_SORT) {
-      // Create temporary allocation space for sorting. Only contiguous for now.
-      // The memory required should be the same for ascending or descending, so
-      // just use ascending here.
-      if constexpr (RANK == 1) {
-        cub::DeviceRadixSort::SortKeys(
-            NULL, temp_storage_bytes, a.Data(), a_out.Data(),
-            static_cast<int>(a.Lsize()), 0, sizeof(T1) * 8, stream);
-      }
-      else {
-        matxAlloc((void **)&d_offsets, (a.Size(RANK - 2) + 1) * sizeof(index_t),
-                  MATX_ASYNC_DEVICE_MEMORY, stream);
-        for (index_t i = 0; i < a.Size(RANK - 2) + 1; i++) {
-          offsets.push_back(i * a.Lsize());
-        }
-
-        cudaMemcpyAsync(d_offsets, offsets.data(),
-                        offsets.size() * sizeof(index_t),
-                        cudaMemcpyHostToDevice, stream);
-
-        cub::DeviceSegmentedRadixSort::SortKeys(
-            NULL, temp_storage_bytes, a.Data(), a_out.Data(),
-            static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-            d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
-      }
+      ExecSort(a_out, a, stream, SORT_DIR_ASC);
     }
     else if constexpr (op == CUB_OP_INC_SUM) {
-      // Scan only is capable of non-batched mode at the moment
-      cub::DeviceScan::InclusiveSum(NULL, temp_storage_bytes, a.Data(),
-                                    a_out.Data(), static_cast<int>(a.Lsize()),
-                                    stream);
+      ExecPrefixScanEx(a_out, a, stream);
     }
     else if constexpr (op == CUB_OP_HIST_EVEN) {
-      cub::DeviceHistogram::HistogramEven(
-          NULL, temp_storage_bytes, a.Data(), a_out.Data(),
-          static_cast<int>(a_out.Lsize() + 1), cparams_.lower_level, cparams_.upper_level,
-          static_cast<int>(a.Lsize()),
-          stream); // Remove this case once CUB is fixed
+      ExecHistEven(a_out, a, cparams_.lower_level, cparams_.upper_level, stream);
     }
     else if constexpr (op == CUB_OP_REDUCE) { // General reduce
       ExecReduce(a_out, a, stream);
@@ -190,14 +161,16 @@ public:
                                   const InputTensor &a)
   {
     CubParams_t params;
-    params.size = a.Lsize();
-    params.A = a.Data();
+    params.size = a.Size(a.Rank() - 1);
     params.op = op;
     if constexpr (op == CUB_OP_RADIX_SORT) {
       params.batches = (RANK == 1) ? 1 : a.Size(RANK - 2);
     }
     else if constexpr (op == CUB_OP_INC_SUM || op == CUB_OP_HIST_EVEN) {
-      params.batches = a.TotalSize() / a.Lsize();
+      params.batches = 1;
+      for (int i = 0; i < a.Rank() - 2; i++) {
+        params.batches *= a.Size(i);
+      }
     }
     params.a_out = a_out.Data();
     params.dtype = TypeToInt<T1>();
@@ -242,11 +215,20 @@ public:
                            const T1 upper, const cudaStream_t stream)
   {
 #ifdef __CUDACC__      
-    if constexpr (RANK == 1) {
-      cub::DeviceHistogram::HistogramEven(
+    if (d_temp == nullptr || RANK == 1) {
+      if (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+        cub::DeviceHistogram::HistogramEven(
           d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
           static_cast<int>(a_out.Lsize() + 1), lower, upper,
-          static_cast<int>(a.Lsize()), stream);
+          static_cast<int>(a.Lsize()), stream);       
+      }
+      else {
+        tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+        cub::DeviceHistogram::HistogramEven(
+          d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+          static_cast<int>(a_out.Lsize() + 1), lower, upper,
+          static_cast<int>(a.Size(a.Rank() - 1)), stream);            
+      }
     }
     else { // Batch higher dims
       using shape_type = typename InputTensor::desc_type::shape_type;
@@ -291,7 +273,7 @@ public:
                                const cudaStream_t stream)
   {
 #ifdef __CUDACC__      
-    if constexpr (RANK == 1) {
+    if (d_temp == nullptr || RANK == 1) {
       cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, a.Data(),
                                     a_out.Data(), static_cast<int>(a.Lsize()),
                                     stream);
@@ -353,46 +335,59 @@ public:
             static_cast<int>(a.Lsize()), 0, sizeof(T1) * 8, stream);
       }
     }        
-    else if constexpr (RANK == 2) {
-        if (dir == SORT_DIR_ASC) {
-          cub::DeviceSegmentedRadixSort::SortKeys(
-              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-              static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-              d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
-        }
-        else {
-          cub::DeviceSegmentedRadixSort::SortKeysDescending(
-              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-              static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-              d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
-        }
-    }
-    else {
-      using shape_type = typename InputTensor::desc_type::shape_type;
-      int batch_offset = 2;
-      std::array<shape_type, InputTensor::Rank()> idx{0};
-      auto a_shape = a.Shape();
-      // Get total number of batches
-      size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
-      for (size_t iter = 0; iter < total_iter; iter++) {
-        auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
-        auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
+    else if constexpr (RANK >= 2) {
+      // Create temporary allocation space for sorting. Only contiguous for now.
+      matxAlloc((void **)&d_offsets, (a.Size(RANK - 2) + 1) * sizeof(index_t),
+                MATX_ASYNC_DEVICE_MEMORY, stream);
+      for (index_t i = 0; i < a.Size(RANK - 2) + 1; i++) {
+        offsets.push_back(i * a.Lsize());
+      }
 
+      cudaMemcpyAsync(d_offsets, offsets.data(),
+                      offsets.size() * sizeof(index_t),
+                      cudaMemcpyHostToDevice, stream);
+
+      if constexpr (RANK == 2) {
         if (dir == SORT_DIR_ASC) {
           cub::DeviceSegmentedRadixSort::SortKeys(
-              d_temp, temp_storage_bytes, ap, aop,
+              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
               static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
               d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
         }
         else {
           cub::DeviceSegmentedRadixSort::SortKeysDescending(
-              d_temp, temp_storage_bytes, ap, aop,
+              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
               static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
               d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
         }
-          
-        // Update all but the last 2 indices
-        UpdateIndices<InputTensor, shape_type, InputTensor::Rank()>(a, idx, batch_offset);        
+      }
+      else {
+        using shape_type = typename InputTensor::desc_type::shape_type;
+        int batch_offset = 2;
+        std::array<shape_type, InputTensor::Rank()> idx{0};
+        auto a_shape = a.Shape();
+        // Get total number of batches
+        size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
+        for (size_t iter = 0; iter < total_iter; iter++) {
+          auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
+          auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
+
+          if (dir == SORT_DIR_ASC) {
+            cub::DeviceSegmentedRadixSort::SortKeys(
+                d_temp, temp_storage_bytes, ap, aop,
+                static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
+                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          }
+          else {
+            cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                d_temp, temp_storage_bytes, ap, aop,
+                static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
+                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          }
+            
+          // Update all but the last 2 indices
+          UpdateIndices<InputTensor, shape_type, InputTensor::Rank()>(a, idx, batch_offset);        
+        }
       }
     }
 #endif    

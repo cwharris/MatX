@@ -356,17 +356,17 @@ TEST(ReductionTests, MinMax)
     cudaStreamSynchronize(0);
 
     // We need to convert the absolute index into relative before comparing
-    auto rel = t2o.GetIdxFromAbs(t1i_small(0));
+    auto rel = detail::GetIdxFromAbs<decltype(t2o), typename decltype(t2o)::desc_type::stride_type>(t2o, t1i_small(0));
     EXPECT_TRUE(MatXUtils::MatXTypeCompare(t2o(rel), (TypeParam)(5)));
-    rel = t2o.GetIdxFromAbs(t1i_small(1));
+    rel = detail::GetIdxFromAbs<decltype(t2o), typename decltype(t2o)::desc_type::stride_type>(t2o, t1i_small(1));
     EXPECT_TRUE(MatXUtils::MatXTypeCompare(t2o(rel), (TypeParam)(5)));
 
     argmin(t1o_small, t1i_small, t2o);
     cudaStreamSynchronize(0);
     
-    rel = t2o.GetIdxFromAbs(t1i_small(0));
+    rel = detail::GetIdxFromAbs<decltype(t2o), typename decltype(t2o)::desc_type::stride_type>(t2o, t1i_small(0));
     EXPECT_TRUE(MatXUtils::MatXTypeCompare(t2o(rel), (TypeParam)(1)));
-    rel = t2o.GetIdxFromAbs(t1i_small(1));
+    rel = detail::GetIdxFromAbs<decltype(t2o), typename decltype(t2o)::desc_type::stride_type>(t2o, t1i_small(1));
     EXPECT_TRUE(MatXUtils::MatXTypeCompare(t2o(rel), (TypeParam)(1)));  
   }
 

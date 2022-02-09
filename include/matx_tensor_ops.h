@@ -174,6 +174,7 @@ inline
     return detail::Concatenate<Dim, Ts...>{ts...};
   }  
 
+
 /**
  * Chain multiple operator statements
  *
