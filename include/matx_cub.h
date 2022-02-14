@@ -223,32 +223,55 @@ public:
           static_cast<int>(a.Lsize()), stream);       
       }
       else {
-        tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
-        cub::DeviceHistogram::HistogramEven(
-          d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
-          static_cast<int>(a_out.Lsize() + 1), lower, upper,
-          static_cast<int>(a.Size(a.Rank() - 1)), stream);            
+        if constexpr (is_tensor_view_v<InputTensor>) {
+          tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+          cub::DeviceHistogram::HistogramEven(
+            d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+            static_cast<int>(a_out.Lsize() + 1), lower, upper,
+            static_cast<int>(a.Size(a.Rank() - 1)), stream);   
+        }
+        else {
+          cub::DeviceHistogram::HistogramEven(
+            d_temp, temp_storage_bytes, RandomOperatorIterator{a}, a_out.Data(),
+            static_cast<int>(a_out.Lsize() + 1), lower, upper,
+            static_cast<int>(a.Size(a.Rank() - 1)), stream);   
+        }
       }
     }
     else { // Batch higher dims
       using shape_type = typename InputTensor::desc_type::shape_type;
-      int batch_offset = 2;
+      int batch_offset = 1;
       std::array<shape_type, InputTensor::Rank()> idx{0};
       auto a_shape = a.Shape();
       // Get total number of batches
       size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
+
+      // Get multiplier for operators
+      [[maybe_unused]] size_t multiplier = 1;
+      for (int i = 0; i < a.Rank() - batch_offset - 1; i++) {
+        multiplier *= a.Size(i);
+      }
+
       for (size_t iter = 0; iter < total_iter; iter++) {
-        auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
         auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
 
-        cub::DeviceHistogram::HistogramEven(
-            d_temp, temp_storage_bytes, ap, aop,
-            static_cast<int>(a_out.Lsize() + 1), lower, upper,
-            static_cast<int>(a.Lsize()), stream);
+        if constexpr (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+          auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
+          cub::DeviceHistogram::HistogramEven(
+              d_temp, temp_storage_bytes, ap, aop,
+              static_cast<int>(a_out.Lsize() + 1), lower, upper,
+              static_cast<int>(a.Lsize()), stream);
+        }
+        else {
+          cub::DeviceHistogram::HistogramEven(
+              d_temp, temp_storage_bytes, RandomOperatorIterator{a, iter * multiplier}, aop,
+              static_cast<int>(a_out.Lsize() + 1), lower, upper,
+              static_cast<int>(a.Size(a.Rank() - 1)), stream);          
+        }
 
         // Update all but the last 2 indices
         UpdateIndices<InputTensor, shape_type, InputTensor::Rank()>(a, idx, batch_offset);
-      }      
+      }   
     }
 #endif    
   }
@@ -274,9 +297,24 @@ public:
   {
 #ifdef __CUDACC__      
     if (d_temp == nullptr || RANK == 1) {
-      cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, a.Data(),
-                                    a_out.Data(), static_cast<int>(a.Lsize()),
-                                    stream);
+      if (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+        cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, a.Data(),
+                                      a_out.Data(), static_cast<int>(a.Lsize()),
+                                      stream);
+      }
+      else {
+        if constexpr (is_tensor_view_v<InputTensor>) {
+          tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+          cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, RandomOperatorIterator{base},
+                                        a_out.Data(), static_cast<int>(a.Size(a.Rank() - 1)),
+                                        stream);
+        }
+        else {
+          cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, RandomOperatorIterator{a},
+                                        a_out.Data(), static_cast<int>(a.Size(a.Rank() - 1)),
+                                        stream);          
+        }  
+      }
     }
     else {
       using shape_type = typename InputTensor::desc_type::shape_type;
@@ -285,13 +323,27 @@ public:
       auto a_shape = a.Shape();
       // Get total number of batches
       size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
+
+      // Get multiplier for operators
+      [[maybe_unused]] size_t multiplier = 1;
+      for (int i = 0; i < a.Rank() - batch_offset - 1; i++) {
+        multiplier *= a.Size(i);
+      }
+
       for (size_t iter = 0; iter < total_iter; iter++) {
-        auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
         auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
 
-        cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes,ap,
-                                      aop, static_cast<int>(a.Lsize()),
-                                      stream);
+        if constexpr (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+          auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
+          cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes,ap,
+                                        aop, static_cast<int>(a.Size(a.Rank() - 1)),
+                                        stream);
+        }
+        else {
+          cub::DeviceScan::InclusiveSum(d_temp, temp_storage_bytes, RandomOperatorIterator{a, iter * multiplier},
+                                        aop, static_cast<int>(a.Size(a.Rank() - 1)),
+                                        stream);
+        }
 
         // Update all but the last 2 indices
         UpdateIndices<InputTensor, shape_type, InputTensor::Rank()>(a, idx, batch_offset);
@@ -324,41 +376,103 @@ public:
   {
 #ifdef __CUDACC__      
     if constexpr (RANK == 1) {
-      if (dir == SORT_DIR_ASC) {
-        cub::DeviceRadixSort::SortKeys(
-            d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-            static_cast<int>(a.Lsize()), 0, sizeof(T1) * 8, stream);
+      if (is_tensor_view_v<InputTensor> && a.IsLinear()) { // Linear tensor
+        if (dir == SORT_DIR_ASC) {
+          cub::DeviceRadixSort::SortKeys(
+              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
+              static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+        }
+        else {
+          cub::DeviceRadixSort::SortKeysDescending(
+              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
+              static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+        }
       }
       else {
-        cub::DeviceRadixSort::SortKeysDescending(
-            d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-            static_cast<int>(a.Lsize()), 0, sizeof(T1) * 8, stream);
+        if constexpr (is_tensor_view_v<InputTensor>) { // Non-linear tensor layout
+          tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+          if (dir == SORT_DIR_ASC) {
+            cub::DeviceRadixSort::SortKeys(
+                d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+          }
+          else {
+            cub::DeviceRadixSort::SortKeysDescending(
+                d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+          } 
+        }
+        else { // Operator input
+          if (dir == SORT_DIR_ASC) {
+            cub::DeviceRadixSort::SortKeys(
+                d_temp, temp_storage_bytes, RandomOperatorIterator{a}, a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+          }
+          else {
+            cub::DeviceRadixSort::SortKeysDescending(
+                d_temp, temp_storage_bytes, RandomOperatorIterator{a}, a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), 0, sizeof(T1) * 8, stream);
+          }           
+        }         
       }
     }        
-    else if constexpr (RANK >= 2) {
+    else if (RANK >= 2 || d_temp == nullptr) {
       // Create temporary allocation space for sorting. Only contiguous for now.
       matxAlloc((void **)&d_offsets, (a.Size(RANK - 2) + 1) * sizeof(index_t),
                 MATX_ASYNC_DEVICE_MEMORY, stream);
       for (index_t i = 0; i < a.Size(RANK - 2) + 1; i++) {
-        offsets.push_back(i * a.Lsize());
+        offsets.push_back(i * a.Size(a.Rank() - 1));
       }
 
       cudaMemcpyAsync(d_offsets, offsets.data(),
                       offsets.size() * sizeof(index_t),
                       cudaMemcpyHostToDevice, stream);
 
-      if constexpr (RANK == 2) {
-        if (dir == SORT_DIR_ASC) {
-          cub::DeviceSegmentedRadixSort::SortKeys(
-              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-              static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-              d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+      if (RANK == 2 || d_temp == nullptr) {
+        if (is_tensor_view_v<InputTensor> && a.IsLinear()) { // Linear tensor
+          if (dir == SORT_DIR_ASC) {
+            cub::DeviceSegmentedRadixSort::SortKeys(
+                d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          }
+          else {
+            cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
+                static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          }
         }
         else {
-          cub::DeviceSegmentedRadixSort::SortKeysDescending(
-              d_temp, temp_storage_bytes, a.Data(), a_out.Data(),
-              static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-              d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          if constexpr (is_tensor_view_v<InputTensor>) { // Non-linear tensor layout
+            tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+            if (dir == SORT_DIR_ASC) {
+              cub::DeviceSegmentedRadixSort::SortKeys(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+                  static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
+            else {
+              cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{base}, a_out.Data(),
+                  static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }          
+          }
+          else { // Operator input
+            if (dir == SORT_DIR_ASC) {
+              cub::DeviceSegmentedRadixSort::SortKeys(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{a}, a_out.Data(),
+                  static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
+            else {
+              cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{a}, a_out.Data(),
+                  static_cast<int>(a.Size(a.Rank() - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }  
+          }
         }
       }
       else {
@@ -368,21 +482,45 @@ public:
         auto a_shape = a.Shape();
         // Get total number of batches
         size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
+
+        // Get multiplier for operators
+        [[maybe_unused]] size_t multiplier = 1;
+        for (int i = 0; i < a.Rank() - batch_offset - 1; i++) {
+          multiplier *= a.Size(i);
+        }
+        
         for (size_t iter = 0; iter < total_iter; iter++) {
-          auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);
           auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
 
-          if (dir == SORT_DIR_ASC) {
-            cub::DeviceSegmentedRadixSort::SortKeys(
-                d_temp, temp_storage_bytes, ap, aop,
-                static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+          if constexpr (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+            auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);          
+
+            if (dir == SORT_DIR_ASC) {
+              cub::DeviceSegmentedRadixSort::SortKeys(
+                  d_temp, temp_storage_bytes, ap, aop,
+                  static_cast<int>(a.Size(RANK - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
+            else {
+              cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                  d_temp, temp_storage_bytes, ap, aop,
+                  static_cast<int>(a.Size(RANK - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
           }
           else {
-            cub::DeviceSegmentedRadixSort::SortKeysDescending(
-                d_temp, temp_storage_bytes, ap, aop,
-                static_cast<int>(a.Lsize()), static_cast<int>(a.Size(RANK - 2)),
-                d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            if (dir == SORT_DIR_ASC) {
+              cub::DeviceSegmentedRadixSort::SortKeys(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{a, iter * multiplier}, aop,
+                  static_cast<int>(a.Size(RANK - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
+            else {
+              cub::DeviceSegmentedRadixSort::SortKeysDescending(
+                  d_temp, temp_storage_bytes, RandomOperatorIterator{a, iter * multiplier}, aop,
+                  static_cast<int>(a.Size(RANK - 1)), static_cast<int>(a.Size(RANK - 2)),
+                  d_offsets, d_offsets + 1, 0, sizeof(T1) * 8, stream);
+            }
           }
             
           // Update all but the last 2 indices
@@ -417,7 +555,7 @@ public:
   {
 #ifdef __CUDACC__      
     if constexpr (RANK == 0) {
-      if (a.IsLinear()) {
+      if (is_tensor_view_v<InputTensor> && a.IsLinear()) { // Linear tensor
         cub::DeviceReduce::Reduce(d_temp, 
                                   temp_storage_bytes, 
                                   a.Data(), 
@@ -428,19 +566,36 @@ public:
                                   stream); 
       }
       else {
-        tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
-        cub::DeviceReduce::Reduce(d_temp, 
-                                  temp_storage_bytes, 
-                                  RandomOperatorIterator{base}, 
-                                  a_out.Data(), 
-                                  static_cast<int>(a.TotalSize()), 
-                                  cparams_.reduce_op, 
-                                  cparams_.init,
-                                  stream);              
-      }                                     
+        if constexpr (is_tensor_view_v<InputTensor>) { // Non-linear tensor layout
+          tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+          cub::DeviceReduce::Reduce(d_temp, 
+                                    temp_storage_bytes, 
+                                    RandomOperatorIterator{base}, 
+                                    a_out.Data(), 
+                                    static_cast<int>(a.TotalSize()), 
+                                    cparams_.reduce_op, 
+                                    cparams_.init,
+                                    stream);
+        }
+        else { // Operator input
+          size_t total_size = 1;
+          for (int i = 0; i < a.Rank() - 1; i++) {
+            total_size *= a.Size(i);
+          }
+
+          cub::DeviceReduce::Reduce(d_temp, 
+                                    temp_storage_bytes, 
+                                    RandomOperatorIterator{a}, 
+                                    a_out.Data(), 
+                                    static_cast<int>(total_size), 
+                                    cparams_.reduce_op, 
+                                    cparams_.init,
+                                    stream);
+        }  
+      }
     }
-    else if constexpr (RANK == 1) {
-      if (a.IsLinear()) {
+    else if (RANK == 1 || d_temp == nullptr) {
+      if (is_tensor_view_v<InputTensor> && a.IsLinear()) {
         cub::DeviceSegmentedReduce::Reduce( d_temp, 
                                             temp_storage_bytes, 
                                             a.Data(), 
@@ -451,16 +606,72 @@ public:
                                             stream);      
       }
       else {
-        tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
-        cub::DeviceSegmentedReduce::Reduce( d_temp, 
-                                            temp_storage_bytes, 
-                                            RandomOperatorIterator{base},  
-                                            a_out.Data(), 
-                                            static_cast<int>(a_out.Size(0)), 
-                                            d_offsets, 
-                                            d_offsets + 1, 
-                                            stream);         
-      }        
+        if constexpr (is_tensor_view_v<InputTensor>) { // Non-linear tensor layout
+          tensor_impl_t<typename InputTensor::scalar_type, InputTensor::Rank(), typename InputTensor::desc_type> base = a;
+          cub::DeviceSegmentedReduce::Reduce( d_temp, 
+                                              temp_storage_bytes, 
+                                              RandomOperatorIterator{base},  
+                                              a_out.Data(), 
+                                              static_cast<int>(a_out.Size(0)), 
+                                              d_offsets, 
+                                              d_offsets + 1, 
+                                              stream);
+        }
+        else {
+          cub::DeviceSegmentedReduce::Reduce( d_temp, 
+                                              temp_storage_bytes, 
+                                              RandomOperatorIterator{a},  
+                                              a_out.Data(), 
+                                              static_cast<int>(a_out.Size(0)), 
+                                              d_offsets, 
+                                              d_offsets + 1, 
+                                              stream);          
+        }
+      }
+    }
+    else {
+      using shape_type = typename InputTensor::desc_type::shape_type;
+      int batch_offset = 2;
+      std::array<shape_type, InputTensor::Rank()> idx{0};
+      auto a_shape = a.Shape();
+      // Get total number of batches
+      size_t total_iter = std::accumulate(a_shape.begin(), a_shape.begin() + InputTensor::Rank() - batch_offset, 1, std::multiplies<shape_type>());
+
+      // Get multiplier for operators
+      [[maybe_unused]] size_t multiplier = 1;
+      for (int i = 0; i < a.Rank() - batch_offset - 1; i++) {
+        multiplier *= a.Size(i);
+      }
+      
+      for (size_t iter = 0; iter < total_iter; iter++) {
+        auto aop = std::apply([&a_out](auto... param) { return a_out.GetPointer(param...); }, idx);
+
+        if constexpr (is_tensor_view_v<InputTensor> && a.IsLinear()) {
+          auto ap = std::apply([&a](auto... param) { return a.GetPointer(param...); }, idx);          
+
+          cub::DeviceSegmentedReduce::Reduce( d_temp, 
+                                              temp_storage_bytes, 
+                                              a.Data(), 
+                                              a_out.Data(), 
+                                              static_cast<int>(a_out.Size(0)), 
+                                              d_offsets, 
+                                              d_offsets + 1, 
+                                              stream); 
+        }
+        else {
+          cub::DeviceSegmentedReduce::Reduce( d_temp, 
+                                              temp_storage_bytes, 
+                                              a.Data(), 
+                                              a_out.Data(), 
+                                              static_cast<int>(a_out.Size(0)), 
+                                              d_offsets, 
+                                              d_offsets + 1, 
+                                              stream); 
+        }
+          
+        // Update all but the last 2 indices
+        UpdateIndices<InputTensor, shape_type, InputTensor::Rank()>(a, idx, batch_offset);        
+      }
     }
 #endif    
   }  
